@@ -1,0 +1,6 @@
+# Ignore virtual environment and data
+venv/
+data/
+*.log
+__pycache__/
+data/

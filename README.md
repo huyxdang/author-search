@@ -1,2 +1,2 @@
 # author-search
-search for research authors
+search for AI research authors
