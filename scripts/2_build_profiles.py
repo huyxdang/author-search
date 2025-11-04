@@ -8,6 +8,7 @@ from semanticscholar import SemanticScholar  # type: ignore
 import os
 import time
 import re
+import signal
 from dotenv import load_dotenv
 from typing import Dict, List, Optional, Set
 from datetime import datetime
@@ -172,6 +173,7 @@ def build_enriched_author_profile(author_name: str, papers: List[Dict]) -> Dict:
     """
     Build a semantically rich author profile with multiple inference signals
     """
+    print(f"  → Building profile for {author_name}...")
     # Sort papers by date
     papers_sorted = sorted(papers, key=lambda p: p['published'], reverse=True)
     
@@ -183,7 +185,9 @@ def build_enriched_author_profile(author_name: str, papers: List[Dict]) -> Dict:
     years_active = last_year - first_year + 1
     
     # Fetch Semantic Scholar data (with verification)
+    print(f"  → Fetching Semantic Scholar data...")
     author_info = fetch_author_info_from_semantic_scholar(author_name, papers)
+    print(f"  → S2 data: {'Found' if author_info else 'Not found'}")
     
     # Extract affiliations and locations
     affiliations = author_info.get('affiliations', []) if author_info else []
@@ -265,6 +269,7 @@ def build_enriched_author_profile(author_name: str, papers: List[Dict]) -> Dict:
     
     # Generate LLM summary for research focus
     try:
+        print(f"  → Generating LLM summary...")
         paper_info = "\n".join([
             f"- {p['title']} ({p['published'][:4]}): {p['abstract'][:100]}..."
             for p in papers_sorted[:10]
@@ -359,6 +364,9 @@ def check_paper_overlap(arxiv_papers: List[Dict], s2_papers: List) -> float:
     
     return overlap / total_unique if total_unique > 0 else 0.0
 
+def timeout_handler(signum, frame):
+    raise TimeoutError("Semantic Scholar API call timed out")
+
 def fetch_author_info_from_semantic_scholar(author_name: str, arxiv_papers: List[Dict] = None) -> Optional[Dict]:
     """
     Enhanced version with verification by checking paper overlap
@@ -367,8 +375,16 @@ def fetch_author_info_from_semantic_scholar(author_name: str, arxiv_papers: List
         return author_cache[author_name]
     
     try:
-        # Search for author - get multiple candidates
+        # Set a timeout for the API call (30 seconds)
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(30)
+        
+        # Search for author - get multiple candidates (with timeout handling)
+        print(f"    Searching Semantic Scholar for: {author_name}")
         search_results = sch.search_author(author_name, limit=5)
+        print(f"    Found {len(search_results) if search_results else 0} candidates")
+        
+        signal.alarm(0)  # Cancel the alarm
         
         if not search_results:
             author_cache[author_name] = None
@@ -460,10 +476,15 @@ def fetch_author_info_from_semantic_scholar(author_name: str, arxiv_papers: List
                 if country in affil:
                     locations.add(country)
         
-        # Get metrics
-        citation_count = getattr(best_match, 'citationCount', 0) if hasattr(best_match, 'citationCount') else best_match.get('citationCount', 0)
-        paper_count = getattr(best_match, 'paperCount', 0) if hasattr(best_match, 'paperCount') else best_match.get('paperCount', 0)
-        h_index = getattr(best_match, 'hIndex', 0) if hasattr(best_match, 'hIndex') else best_match.get('hIndex', 0)
+        # Get metrics (handle None values from Semantic Scholar)
+        citation_count = getattr(best_match, 'citationCount', None) if hasattr(best_match, 'citationCount') else best_match.get('citationCount', None)
+        paper_count = getattr(best_match, 'paperCount', None) if hasattr(best_match, 'paperCount') else best_match.get('paperCount', None)
+        h_index = getattr(best_match, 'hIndex', None) if hasattr(best_match, 'hIndex') else best_match.get('hIndex', None)
+        
+        # Convert None to 0 to avoid comparison errors
+        citation_count = citation_count if citation_count is not None else 0
+        paper_count = paper_count if paper_count is not None else 0
+        h_index = h_index if h_index is not None else 0
         
         result = {
             'affiliations': affiliations,
@@ -480,8 +501,17 @@ def fetch_author_info_from_semantic_scholar(author_name: str, arxiv_papers: List
         
         return result
         
+    except TimeoutError:
+        signal.alarm(0)  # Cancel the alarm
+        print(f"    ⚠️  Timeout fetching data for {author_name} (skipping)")
+        author_cache[author_name] = None
+        return None
+    except KeyboardInterrupt:
+        signal.alarm(0)  # Cancel the alarm
+        raise  # Allow user to stop the script
     except Exception as e:
-        print(f"Error fetching data for {author_name}: {e}")
+        signal.alarm(0)  # Cancel the alarm
+        print(f"    ⚠️  Error fetching data for {author_name}: {e}")
         author_cache[author_name] = None
         return None
 
@@ -500,6 +530,10 @@ if __name__ == "__main__":
     with open('data/papers.json', 'r') as f:
         papers = json.load(f)
     
+    # QUICK TEST: Use first 1000 papers only
+    papers = papers[:1000]
+    print(f"[TEST MODE] Using first 1000 papers")
+    
     print(f"Loaded {len(papers)} papers")
     
     # Group by author
@@ -514,12 +548,18 @@ if __name__ == "__main__":
     }
     print(f"Authors with 1+ papers: {len(author_papers_filtered)}")
     
+    # QUICK TEST: Process only first 100 authors
+    author_papers_filtered = dict(list(author_papers_filtered.items())[:100])
+    print(f"[TEST MODE] Processing first 100 authors")
+    
     # Build enriched profiles
     profiles = []
     for i, (author, papers) in enumerate(author_papers_filtered.items()):
         try:
+            print(f"\nProcessing author {i+1}/100: {author} ({len(papers)} papers)...")
             profile = build_enriched_author_profile(author, papers)
             profiles.append(profile)
+            print(f"  ✓ Completed {author}")
             
             if (i + 1) % 10 == 0:
                 print(f"Processed {i + 1}/{len(author_papers_filtered)} authors...")
